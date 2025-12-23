@@ -11,240 +11,186 @@ from zigpy.zcl.clusters.general import (
 from zigpy.zcl.clusters.lightlink import LightLink
 
 from zhaquirks.const import (
-    CLUSTER_ID, COMMAND, DEVICE_TYPE, ENDPOINT_ID, ENDPOINTS, INPUT_CLUSTERS,
-    LONG_PRESS, LONG_RELEASE, MODELS_INFO, OUTPUT_CLUSTERS, PARAMS, PROFILE_ID,
-    SHORT_PRESS, TURN_OFF, TURN_ON, DIM_UP, DIM_DOWN, COMMAND_BUTTON_DOUBLE,
-    COMMAND_ON, COMMAND_OFF, COMMAND_MOVE_ON_OFF, COMMAND_STOP_ON_OFF, COMMAND_MOVE, COMMAND_STOP,
-    ZHA_SEND_EVENT, DOUBLE_PRESS, TRIPLE_PRESS, QUADRUPLE_PRESS, QUINTUPLE_PRESS
+    MODELS_INFO, PROFILE_ID, DEVICE_TYPE, ENDPOINTS, INPUT_CLUSTERS, OUTPUT_CLUSTERS,
+    COMMAND_BUTTON_DOUBLE, COMMAND_ON, COMMAND_OFF, ZHA_SEND_EVENT,
+    SHORT_PRESS, DOUBLE_PRESS, TRIPLE_PRESS, QUADRUPLE_PRESS, QUINTUPLE_PRESS, COMMAND
 )
 from zhaquirks.ikea import IKEA, IKEA_CLUSTER_ID, PowerConfig1AAACluster
 
 _LOGGER = logging.getLogger(__name__)
 
-CLICK_TIMEOUT = 0.35  # 350ms window for detecting multiple clicks
-DUAL_BUTTON_TIMEOUT = 0.20  # 200ms window for detecting simultaneous button presses
+# Timing constants (base values)
+CLICK_TIMEOUT = 0.45  # 450ms window for detecting multiple clicks
+DUAL_BUTTON_TIMEOUT = 0.15  # 150ms window for detecting simultaneous button presses
+
+# Click type mapping
+CLICK_TYPES = {
+    1: SHORT_PRESS,
+    2: DOUBLE_PRESS,
+    3: TRIPLE_PRESS,
+    4: QUADRUPLE_PRESS,
+    5: QUINTUPLE_PRESS,
+}
+
+# Button names
+ON_BUTTON = "on"
+OFF_BUTTON = "off"
+DUAL_BUTTON = "dual"
 
 
 class MultiClickOnOffCluster(OnOff):
-    """OnOff cluster with multi-click detection."""
+    """OnOff cluster with multi-click detection for single and dual button presses."""
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self._click_count = {"on": 0, "off": 0, "dual": 0}
-        self._click_timer = {"on": None, "off": None, "dual": None}
-        self._last_button_press = {"on": None, "off": None}
-        self._last_dual_press = None
-        self._first_button_in_dual = None  # Track which button was pressed first
-        
-        # Only initialize multi-click for actual devices, not groups
-        if hasattr(self.endpoint, 'device') and hasattr(self.endpoint.device, 'ieee'):
-            _LOGGER.info(f"MultiClickOnOffCluster initialized for device {self.endpoint.device.ieee}")
-        else:
-            _LOGGER.info(f"MultiClickOnOffCluster initialized for group/other endpoint")
+        # Track button presses with timestamps: [(button, timestamp), ...]
+        try:
+            object.__setattr__(self, '_presses', [])
+            object.__setattr__(self, '_timer', None)
+            # Configurable timeouts (can be overridden for testing)
+            object.__setattr__(self, 'click_timeout', CLICK_TIMEOUT)
+            object.__setattr__(self, 'dual_button_timeout', DUAL_BUTTON_TIMEOUT)
+        except Exception:
+            pass
+
+    def __getattr__(self, name):
+        """Handle attribute access for private attributes."""
+        if name in ('_presses', '_timer', 'click_timeout', 'dual_button_timeout'):
+            try:
+                return object.__getattribute__(self, name)
+            except AttributeError:
+                if name == '_presses':
+                    presses = []
+                    object.__setattr__(self, '_presses', presses)
+                    return presses
+                elif name == '_timer':
+                    return None
+                elif name == 'click_timeout':
+                    return CLICK_TIMEOUT
+                elif name == 'dual_button_timeout':
+                    return DUAL_BUTTON_TIMEOUT
+        return super().__getattr__(name)
 
     async def _handle_click(self, button: str) -> None:
-        """Handle button click with multi-click detection."""
-        self._click_count[button] += 1
-        self._last_button_press[button] = asyncio.get_event_loop().time()
-        _LOGGER.info(f"RODRET: Click #{self._click_count[button]} on {button} button")
+        """Handle button click with multi-click and sequence detection."""
+        now = asyncio.get_event_loop().time()
+        
+        # Ensure _presses exists
+        try:
+            presses = object.__getattribute__(self, '_presses')
+        except AttributeError:
+            presses = []
+            object.__setattr__(self, '_presses', presses)
+        
+        # Add this press
+        presses.append((button, now))
+        
+        # Cancel existing timer
+        try:
+            timer = object.__getattribute__(self, '_timer')
+        except AttributeError:
+            timer = None
+        
+        if timer:
+            timer.cancel()
+        
+        # Set new timer to process presses
+        object.__setattr__(self, '_timer', asyncio.create_task(self._process_presses()))
 
-        # Check for dual button press (simultaneous within DUAL_BUTTON_TIMEOUT)
-        other_button = "off" if button == "on" else "on"
-        if self._last_button_press[other_button] is not None:
-            time_diff = self._last_button_press[button] - self._last_button_press[other_button]
+    async def _process_presses(self) -> None:
+        """Process accumulated presses after timeout."""
+        try:
+            await asyncio.sleep(self.click_timeout)
+            self._emit_event_for_presses()
+            self._presses.clear()
+        except asyncio.CancelledError:
+            pass
+
+    def _emit_event_for_presses(self) -> None:
+        """Analyze presses and emit appropriate event."""
+        presses = self._presses
+        if not presses:
+            return
+        
+        # Extract buttons and timestamps
+        buttons = [p[0] for p in presses]
+        times = [p[1] for p in presses]
+        
+        event_name = None
+        
+        # Determine event type based on press pattern
+        if len(presses) == 1:
+            # Single press
+            event_name = f"{buttons[0]}_{SHORT_PRESS}"
+        
+        elif len(set(buttons)) == 1:
+            # All same button - count presses
+            count = len(presses)
+            if count > 5:
+                count = 5
             
-            # Simultaneous press (< DUAL_BUTTON_TIMEOUT)
-            if abs(time_diff) < DUAL_BUTTON_TIMEOUT:
-                _LOGGER.info(f"RODRET: Dual button press detected! on={self._last_button_press['on']}, off={self._last_button_press['off']}")
-                # Determine which button was pressed first
-                if self._last_button_press["on"] < self._last_button_press["off"]:
-                    self._first_button_in_dual = "on"
+            click_type = CLICK_TYPES.get(count, SHORT_PRESS)
+            event_name = f"{buttons[0]}_{click_type}"
+        
+        else:
+            # Mixed buttons - check timing to distinguish dual vs sequential
+            time_between_first_two = times[1] - times[0]
+            
+            if time_between_first_two < self.dual_button_timeout and len(presses) == 2:
+                # Very fast (dual button timeout) AND exactly 2 presses - treat as dual button press
+                event_name = "button_double"
+            
+            elif time_between_first_two < self.dual_button_timeout and len(presses) > 2:
+                # Very fast but more than 2 presses - check for repeated dual button pattern
+                # Only treat as dual button if it's a clear pattern like ON-OFF-ON-OFF
+                dual_count = 1
+                i = 2
+                while i + 1 < len(presses):
+                    if (buttons[i] != buttons[i+1] and 
+                        (times[i+1] - times[i]) < self.dual_button_timeout and
+                        (times[i] - times[i-1]) < self.click_timeout):
+                        dual_count += 1
+                        i += 2
+                    else:
+                        break
+                
+                if dual_count > 1 and i == len(presses):
+                    # Complete dual button pattern (all presses accounted for)
+                    click_type = CLICK_TYPES.get(dual_count, QUINTUPLE_PRESS)
+                    event_name = f"button_double_{click_type}"
                 else:
-                    self._first_button_in_dual = "off"
-                _LOGGER.info(f"RODRET: First button in dual press: {self._first_button_in_dual}")
-                # Cancel individual timers
-                if self._click_timer[button]:
-                    self._click_timer[button].cancel()
-                if self._click_timer[other_button]:
-                    self._click_timer[other_button].cancel()
-                # Handle dual button click
-                asyncio.create_task(self._handle_dual_click())
-                # Reset individual buttons
-                self._click_count["on"] = 0
-                self._click_count["off"] = 0
-                self._last_button_press["on"] = None
-                self._last_button_press["off"] = None
-                return
+                    # Incomplete pattern or mixed - treat as sequential
+                    event_name = "_".join(buttons)
             
-            # Sequential press (between DUAL_BUTTON_TIMEOUT and CLICK_TIMEOUT)
-            elif time_diff > DUAL_BUTTON_TIMEOUT and time_diff < CLICK_TIMEOUT:
-                _LOGGER.info(f"RODRET: Sequential button press detected! {other_button} -> {button}")
-                # Cancel individual timers
-                if self._click_timer[button]:
-                    self._click_timer[button].cancel()
-                if self._click_timer[other_button]:
-                    self._click_timer[other_button].cancel()
-                # Emit sequential event
-                self._emit_sequential_press(other_button, button)
-                # Reset
-                self._click_count["on"] = 0
-                self._click_count["off"] = 0
-                self._last_button_press["on"] = None
-                self._last_button_press["off"] = None
-                return
-
-        # Cancel existing timer for this button
-        if self._click_timer[button]:
-            _LOGGER.info(f"RODRET: Cancelling existing timer for {button} button")
-            self._click_timer[button].cancel()
-
-        # Set new timer to process clicks after timeout
-        self._click_timer[button] = asyncio.create_task(self._process_clicks(button))
-
-    async def _process_clicks(self, button: str) -> None:
-        """Process accumulated clicks after timeout."""
-        try:
-            await asyncio.sleep(CLICK_TIMEOUT)
-
-            click_count = self._click_count[button]
-
-            _LOGGER.info(f"RODRET: {click_count} click(s) on {button} button - emitting event")
-
-            # Emit appropriate event based on click count
-            if click_count == 1:
-                self._emit_single_click(button)
-            elif click_count == 2:
-                self._emit_double_click(button)
-            elif click_count == 3:
-                self._emit_triple_click(button)
-            elif click_count == 4:
-                self._emit_quadruple_click(button)
-            elif click_count >= 5:
-                self._emit_quintuple_click(button)
-
-            # Reset for next sequence
-            self._click_count[button] = 0
-            self._click_timer[button] = None
-
-        except asyncio.CancelledError:
-            _LOGGER.info(f"RODRET: Click timer cancelled for {button} button")
-            pass
-
-    def _emit_single_click(self, button: str) -> None:
-        """Emit single click event."""
-        _LOGGER.info(f"RODRET: Emitting single click event for {button}")
-        # Emit the custom event instead of letting the default "On"/"Off" event through
-        self.listener_event(ZHA_SEND_EVENT, f"{button}_{SHORT_PRESS}", {})
-
-    def _emit_double_click(self, button: str) -> None:
-        """Emit double click event."""
-        _LOGGER.info(f"RODRET: Emitting double click event for {button}")
-        self.listener_event(ZHA_SEND_EVENT, f"{button}_{DOUBLE_PRESS}", {})
-
-    def _emit_triple_click(self, button: str) -> None:
-        """Emit triple click event."""
-        _LOGGER.info(f"RODRET: Emitting triple click event for {button}")
-        self.listener_event(ZHA_SEND_EVENT, f"{button}_{TRIPLE_PRESS}", {})
-
-    def _emit_quadruple_click(self, button: str) -> None:
-        """Emit quadruple click event."""
-        _LOGGER.info(f"RODRET: Emitting quadruple click event for {button}")
-        self.listener_event(ZHA_SEND_EVENT, f"{button}_{QUADRUPLE_PRESS}", {})
-
-    def _emit_quintuple_click(self, button: str) -> None:
-        """Emit quintuple click event."""
-        _LOGGER.info(f"RODRET: Emitting quintuple click event for {button}")
-        self.listener_event(ZHA_SEND_EVENT, f"{button}_{QUINTUPLE_PRESS}", {})
-
-    async def _handle_dual_click(self) -> None:
-        """Handle dual button click with multi-click detection."""
-        self._click_count["dual"] += 1
-        self._last_dual_press = asyncio.get_event_loop().time()
-        _LOGGER.info(f"RODRET: Dual click #{self._click_count['dual']}")
-
-        # Cancel existing timer for dual button
-        if self._click_timer["dual"]:
-            _LOGGER.info(f"RODRET: Cancelling existing timer for dual button")
-            self._click_timer["dual"].cancel()
-
-        # Set new timer to process dual clicks after timeout
-        self._click_timer["dual"] = asyncio.create_task(self._process_dual_clicks())
-
-    async def _process_dual_clicks(self) -> None:
-        """Process accumulated dual clicks after timeout."""
-        try:
-            await asyncio.sleep(CLICK_TIMEOUT)
-
-            click_count = self._click_count["dual"]
-
-            _LOGGER.info(f"RODRET: {click_count} dual click(s) - emitting event")
-
-            # Emit appropriate event based on click count
-            if click_count == 1:
-                self._emit_dual_button_press()
-            elif click_count == 2:
-                self._emit_dual_double_click()
-            elif click_count >= 3:
-                self._emit_dual_triple_click()
-
-            # Reset for next sequence
-            self._click_count["dual"] = 0
-            self._click_timer["dual"] = None
-
-        except asyncio.CancelledError:
-            _LOGGER.info(f"RODRET: Dual click timer cancelled")
-            pass
-
-    def _emit_dual_button_press(self) -> None:
-        """Emit dual button press event."""
-        _LOGGER.info(f"RODRET: Emitting dual button press event")
-        self.listener_event(ZHA_SEND_EVENT, COMMAND_BUTTON_DOUBLE, {})
-
-    def _emit_dual_double_click(self) -> None:
-        """Emit dual button double click event."""
-        _LOGGER.info(f"RODRET: Emitting dual button double click event")
-        self.listener_event(ZHA_SEND_EVENT, f"{COMMAND_BUTTON_DOUBLE}_{DOUBLE_PRESS}", {})
-
-    def _emit_dual_triple_click(self) -> None:
-        """Emit dual button triple click event."""
-        _LOGGER.info(f"RODRET: Emitting dual button triple click event")
-        self.listener_event(ZHA_SEND_EVENT, f"{COMMAND_BUTTON_DOUBLE}_{TRIPLE_PRESS}", {})
-
-    def _emit_sequential_press(self, first_button: str, second_button: str) -> None:
-        """Emit sequential button press event."""
-        event_name = f"{first_button}_{second_button}"
-        _LOGGER.info(f"RODRET: Emitting sequential press event: {event_name}")
-        self.listener_event(ZHA_SEND_EVENT, event_name, {})
+            else:
+                # Slower (sequential timeout) - treat as sequential button press
+                event_name = "_".join(buttons)
+        
+        # Emit the event
+        if event_name:
+            _LOGGER.debug(f"RODRET: Emitting event: {event_name}")
+            self.listener_event(ZHA_SEND_EVENT, event_name, {})
 
     def handle_cluster_request(self, hdr, args, **kwargs):
         """Handle cluster requests - intercept button presses."""
         # Only do multi-click detection for actual devices, not groups
-        if hasattr(self.endpoint, 'device') and hasattr(self.endpoint.device, 'ieee'):
-            _LOGGER.info(f"RODRET cluster request: command_id={hdr.command_id}, args={args}")
-            
-            # Check for on/off commands
-            if hdr.command_id == 0x01:  # ON command
-                _LOGGER.info("RODRET: ON button pressed - suppressing default event")
-                asyncio.create_task(self._handle_click("on"))
-                # Return None to suppress default processing
-                return None
-            elif hdr.command_id == 0x00:  # OFF command
-                _LOGGER.info("RODRET: OFF button pressed - suppressing default event")
-                asyncio.create_task(self._handle_click("off"))
-                # Return None to suppress default processing
-                return None
+        if not (hasattr(self.endpoint, 'device') and hasattr(self.endpoint.device, 'ieee')):
+            return super().handle_cluster_request(hdr, args, **kwargs)
+
+        # Check for on/off commands
+        if hdr.command_id == 0x01:  # ON command
+            asyncio.create_task(self._handle_click(ON_BUTTON))
+            return None
+        elif hdr.command_id == 0x00:  # OFF command
+            asyncio.create_task(self._handle_click(OFF_BUTTON))
+            return None
         
-        # Pass through other commands or group requests
+        # Pass through other commands
         return super().handle_cluster_request(hdr, args, **kwargs)
 
 
-
 class IkeaRodretRemoteMultiClick(CustomDevice):
-    """IKEA RODRET with double/triple click support."""
-
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        _LOGGER.info(f"IkeaRodretRemoteMultiClick quirk loaded for device {self.ieee}")
+    """IKEA RODRET remote with multi-click support."""
 
     signature = {
         MODELS_INFO: [(IKEA, "RODRET Dimmer"), (IKEA, "RODRET wireless dimmer")],
@@ -314,4 +260,11 @@ class IkeaRodretRemoteMultiClick(CustomDevice):
         (TRIPLE_PRESS, COMMAND_BUTTON_DOUBLE): {COMMAND: f"{COMMAND_BUTTON_DOUBLE}_{TRIPLE_PRESS}"},
         (SHORT_PRESS, "on_off"): {COMMAND: "on_off"},
         (SHORT_PRESS, "off_on"): {COMMAND: "off_on"},
+        # Triple-click sequences (6 combinations - excluding same button sequences)
+        (SHORT_PRESS, "on_on_off"): {COMMAND: "on_on_off"},
+        (SHORT_PRESS, "on_off_on"): {COMMAND: "on_off_on"},
+        (SHORT_PRESS, "on_off_off"): {COMMAND: "on_off_off"},
+        (SHORT_PRESS, "off_on_on"): {COMMAND: "off_on_on"},
+        (SHORT_PRESS, "off_on_off"): {COMMAND: "off_on_off"},
+        (SHORT_PRESS, "off_off_on"): {COMMAND: "off_off_on"},
     }

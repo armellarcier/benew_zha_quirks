@@ -1,0 +1,4 @@
+pytest==9.0.2
+pytest-asyncio==1.3.0
+zigpy
+git+https://github.com/zigpy/zha-device-handlers.git#egg=zha-quirks

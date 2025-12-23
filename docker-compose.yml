@@ -1,0 +1,11 @@
+services:
+  test:
+    image: python:3.12
+    working_dir: /workspace
+    volumes:
+      - .:/workspace
+      - pip-cache:/root/.cache/pip
+    command: sh -c "pip install -r requirements-test.txt -q && pytest test_rodret.py -v"
+
+volumes:
+  pip-cache:
