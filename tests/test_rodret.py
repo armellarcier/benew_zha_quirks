@@ -25,6 +25,11 @@ Test Coverage:
 import asyncio
 import pytest
 from unittest.mock import Mock, MagicMock
+import sys
+from pathlib import Path
+
+# Add parent directory to path to import rodret
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from rodret import MultiClickOnOffCluster
 from zhaquirks.const import (
