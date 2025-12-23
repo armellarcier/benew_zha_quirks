@@ -28,10 +28,10 @@ from unittest.mock import Mock, MagicMock
 import sys
 from pathlib import Path
 
-# Add parent directory to path to import rodret
+# Add parent directory to path to import ikea_rodret
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from rodret import MultiClickOnOffCluster
+from ikea_rodret import MultiClickOnOffCluster
 from zhaquirks.const import (
     SHORT_PRESS, DOUBLE_PRESS, TRIPLE_PRESS, QUADRUPLE_PRESS, QUINTUPLE_PRESS,
     COMMAND_ON, COMMAND_OFF, COMMAND_BUTTON_DOUBLE, COMMAND, ZHA_SEND_EVENT
@@ -43,8 +43,8 @@ ON_COMMAND_ID = 0x01
 OFF_COMMAND_ID = 0x00
 
 # Custom test timing constants (faster than real-world for quicker tests)
-TEST_CLICK_TIMEOUT = 0.045  # 35ms window (10x faster than real 350ms)
-TEST_DUAL_BUTTON_TIMEOUT = 0.015  # 20ms window (10x faster than real 200ms)
+TEST_CLICK_TIMEOUT = 0.045  # faster than real
+TEST_DUAL_BUTTON_TIMEOUT = 0.015  # faster than real
 
 # Sleep durations for test timing
 QUICK_PRESS_INTERVAL = 0.005  # Time between rapid presses
@@ -350,7 +350,7 @@ class TestTimingBoundaries:
     async def test_dual_button_timeout_boundary_under(self, cluster):
         """Presses just under DUAL_BUTTON_TIMEOUT should be detected as dual button."""
         await TestHelpers.press_button(cluster, ON_COMMAND_ID)
-        await asyncio.sleep(TEST_DUAL_BUTTON_TIMEOUT - MINIMAL_PRESS_INTERVAL)
+        await asyncio.sleep(TEST_DUAL_BUTTON_TIMEOUT - QUICK_PRESS_INTERVAL)
         await TestHelpers.press_button(cluster, OFF_COMMAND_ID)
         await TestHelpers.wait_for_event()
         
@@ -361,7 +361,7 @@ class TestTimingBoundaries:
     async def test_click_timeout_boundary(self, cluster):
         """Presses at exact CLICK_TIMEOUT should still emit event."""
         await TestHelpers.press_button(cluster, ON_COMMAND_ID)
-        await asyncio.sleep(TEST_CLICK_TIMEOUT + MINIMAL_PRESS_INTERVAL)
+        await asyncio.sleep(TEST_CLICK_TIMEOUT + QUICK_PRESS_INTERVAL)
         
         # Event should be emitted after timeout
         TestHelpers.assert_event_emitted(cluster, "on_remote_button_short_press")
@@ -667,7 +667,7 @@ class TestDeviceAutomationTriggers:
     
     def test_all_single_button_triggers_defined(self):
         """Verify all single button click triggers are defined."""
-        from rodret import IkeaRodretRemoteMultiClick
+        from ikea_rodret import IkeaRodretRemoteMultiClick
         
         triggers = IkeaRodretRemoteMultiClick.device_automation_triggers
         
@@ -687,7 +687,7 @@ class TestDeviceAutomationTriggers:
     
     def test_all_dual_button_triggers_defined(self):
         """Verify all dual button click triggers are defined."""
-        from rodret import IkeaRodretRemoteMultiClick
+        from ikea_rodret import IkeaRodretRemoteMultiClick
         
         triggers = IkeaRodretRemoteMultiClick.device_automation_triggers
         
@@ -697,7 +697,7 @@ class TestDeviceAutomationTriggers:
     
     def test_all_sequential_triggers_defined(self):
         """Verify all sequential button press triggers are defined."""
-        from rodret import IkeaRodretRemoteMultiClick
+        from ikea_rodret import IkeaRodretRemoteMultiClick
         
         triggers = IkeaRodretRemoteMultiClick.device_automation_triggers
         
@@ -715,7 +715,7 @@ class TestDeviceAutomationTriggers:
     
     def test_trigger_command_values_correct(self):
         """Verify trigger command values are correctly formatted."""
-        from rodret import IkeaRodretRemoteMultiClick
+        from ikea_rodret import IkeaRodretRemoteMultiClick
         
         triggers = IkeaRodretRemoteMultiClick.device_automation_triggers
         
@@ -735,7 +735,7 @@ class TestDeviceAutomationTriggers:
     
     def test_total_trigger_count(self):
         """Verify the total number of triggers is correct."""
-        from rodret import IkeaRodretRemoteMultiClick
+        from ikea_rodret import IkeaRodretRemoteMultiClick
         
         triggers = IkeaRodretRemoteMultiClick.device_automation_triggers
         
